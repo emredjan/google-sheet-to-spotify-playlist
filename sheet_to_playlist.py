@@ -9,13 +9,14 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from spotipy.oauth2 import SpotifyOAuth
 
 from resources import PLAYLIST_ID, SPREADSHEET_ID
 
 # Google Things
 # If modifying these scopes, delete the file token.json.
-GOOGLE_SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+GOOGLE_SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 # Spotify things
 SPOTIFY_SCOPES = [
@@ -28,31 +29,43 @@ SPOTIFY_SCOPES = [
 sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=SPOTIFY_SCOPES))
 
 
-def get_data_from_sheets():
+MAX_RANGE = 500
+RANGE_OFFSET = 3
+RANGE = f'A{RANGE_OFFSET}:C{MAX_RANGE}'
+WRITE_COLUMN = 'K'
 
-    max_range = 500
-    RANGE = f'A3:C{max_range}'
+
+def connect_to_sheets():
 
     creds = None
     # The file token.json stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first
     # time.
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', GOOGLE_SCOPES)
+    if os.path.exists('google_token.json'):
+        creds = Credentials.from_authorized_user_file(
+            'google_token.json', GOOGLE_SCOPES
+        )
     # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', GOOGLE_SCOPES
+                'google_credentials.json', GOOGLE_SCOPES
             )
             creds = flow.run_local_server(port=0)
         # Save the credentials for the next run
-        with open('token.json', 'w') as token:
+        with open('google_token.json', 'w') as token:
             token.write(creds.to_json())
 
     service = build('sheets', 'v4', credentials=creds)
+
+    return service
+
+
+def get_data_from_sheets():
+
+    service = connect_to_sheets()
 
     # Call the Sheets API
     sheet = service.spreadsheets()
@@ -63,7 +76,11 @@ def get_data_from_sheets():
         print('No data found.')
         return
 
-    df = pd.DataFrame(values, columns=['Artist', 'Track', 'Suggested By']).dropna()
+    df = (
+        pd.DataFrame(values, columns=['Artist', 'Track', 'Suggested By'])
+        .dropna()
+        .reset_index(drop=True)
+    )
 
     return df
 
@@ -72,7 +89,8 @@ def main():
 
     df = get_data_from_sheets()
 
-    # print(df)
+    service = connect_to_sheets()
+    sheet = service.spreadsheets()
 
     existing_tracks = []
     offset = 0
@@ -90,20 +108,23 @@ def main():
         existing_tracks += [i['track']['id'] for i in response['items']]
 
     tracks = []
+    spotify_urls = []
     for index, row in df.iterrows():
 
-        query = row['Track'] + ' NOT live NOT feat artist:' + row['Artist']
+        query = 'track:' + row['Track'].replace('\'', '') + ' NOT live NOT feat artist:' + row['Artist']
 
         track = sp.search(query, limit=1, type='track', market='NL')
 
         print(
-            ('For: ' + row['Artist']).ljust(35) + row['Track'].ljust(35),
+            ('For: ' + row['Artist']).ljust(35) + row['Track'].ljust(40),
             end='',
             # fg='bright_white',
         )
 
         if not track['tracks']['items']:
             print('Found: NOTHING!')  # , fg='bright_red')
+
+            spotify_urls.append('')
 
         else:
 
@@ -124,8 +145,30 @@ def main():
             if not track_id in existing_tracks:
                 tracks.append(track_id)
 
-    # print(tracks)
+            spotify_urls.append(track['tracks']['items'][0]['external_urls']['spotify'])
 
+    print('\nWriting Spotify links back to sheet...', end='')
+    write_range = f'{WRITE_COLUMN}{RANGE_OFFSET}:{WRITE_COLUMN}{len(spotify_urls)+RANGE_OFFSET-1}'
+
+    try:
+        body = {'values': [[x] for x in spotify_urls]}
+        result = (
+            service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=write_range,
+                valueInputOption='RAW',
+                body=body,
+            )
+            .execute()
+        )
+        print('Done.')
+    except HttpError:
+        print('Failed.')
+
+    # print(tracks)
+    print()
     if tracks:
         print(
             f'Adding {len(tracks)} track(s) to playlist...', end=''

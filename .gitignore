@@ -141,6 +141,6 @@ cython_debug/
 # Project specific
 *credentials.*
 .vscode
-token.json
+*token.json
 resources.py
 *_test.py
